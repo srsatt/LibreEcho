@@ -1,7 +1,9 @@
 """Execute the shipped resolver branches without any GitHub/network operations."""
 import os
+import hashlib
 from pathlib import Path
 import subprocess
+import tempfile
 import textwrap
 import unittest
 
@@ -53,6 +55,85 @@ class CandidateSelectionTests(unittest.TestCase):
                 ['release/0.14.0'] * 3)
         self.assertEqual(self.selection(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/main',
                                         GITHUB_REF_NAME='main'), ['main'] * 3)
+
+    def sources(self, **overrides):
+        block = shell_block('          component_ref=main\n',
+                            '          python3 build/ci/resolve-source-set.py')
+        # Pinned source selection must not consult a branch tip or the network.
+        stub = 'git() { echo unexpected-git >&2; return 1; }\n'
+        inputs = dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main',
+                      GITHUB_REF_NAME='main', GITHUB_REPOSITORY='srsatt/LibreEcho',
+                      PURPOSE='sandbox', SIGNING_MODE='local', GITHUB_OUTPUT='/dev/null',
+                      FORK_VERSION_INPUT='1.0.0',
+                      PLATFORM_SOURCE_INPUT='aslater3/LibreEcho-Platform@' + 'a' * 40,
+                      LINUX_COMMIT_INPUT='2da646edaf294ead68123a2450eff49b8084c3ea',
+                      UI_SOURCE_INPUT='srsatt/LibreEcho-UI@' + 'b' * 40)
+        inputs.update(overrides)
+        return self.run_shell(stub + block + '\nprintf "%s\\n" "$p" "$l" "$u" "$platform_repository" "$ui_repository"',
+                              **inputs)
+
+    def test_owner_sandbox_pins_exact_sources_without_branch_lookup(self):
+        result = self.sources()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['a' * 40, '2da646edaf294ead68123a2450eff49b8084c3ea', 'b' * 40,
+                          'aslater3/LibreEcho-Platform', 'srsatt/LibreEcho-UI'])
+        inputs = WORKFLOW.split('    inputs:\n', 1)[1].split('\npermissions:', 1)[0]
+        self.assertEqual(inputs.count('        type: string'), 6)
+        self.assertIn('repository: ${{ needs.resolve-and-preflight.outputs.platform_repository }}', WORKFLOW)
+        self.assertIn('repository: ${{ needs.resolve-and-preflight.outputs.ui_repository }}', WORKFLOW)
+        self.assertIn('repository: ${{ github.repository }}', WORKFLOW)
+
+    def test_owner_sources_reject_invalid_or_unsafe_inputs(self):
+        for overrides in ({'PLATFORM_SOURCE_INPUT': 'srsatt/LibreEcho-Platform@' + 'A' * 40},
+                          {'UI_SOURCE_INPUT': 'someone/LibreEcho-UI@' + 'b' * 40},
+                          {'LINUX_COMMIT_INPUT': 'main'},
+                          {'LINUX_COMMIT_INPUT': '2' * 40},
+                          {'GITHUB_EVENT_NAME': 'push'},
+                          {'PURPOSE': 'dev'},
+                          {'SIGNING_MODE': 'github'},
+                          {'FORK_VERSION_INPUT': ''},
+                          {'FORK_VERSION_INPUT': '0.14.4'},
+                          {'GITHUB_REPOSITORY': 'aslater3/LibreEcho'}):
+            with self.subTest(overrides=overrides):
+                result = self.sources(**overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('unexpected-git', result.stderr)
+
+    def test_fork_builder_and_independent_verifier_receive_same_trust_policy(self):
+        build = (ROOT / 'build/build.sh').read_text()
+        self.assertIn('fork_image_args=(--release-repository srsatt)', build)
+        self.assertIn('fork_verifier_args=(--expected-release-repository srsatt)', build)
+        self.assertIn('[[ "$TARGET" != biscuit ]] || fork_image_args+=(--legacy-ota-public-key "$OTA_LEGACY_PUBLIC_KEY")', build)
+        self.assertIn('[[ "$TARGET" != biscuit ]] || fork_verifier_args+=(--expected-legacy-ota-public-key-sha256 524c2b6343438b6ccffca8a8c7f0b9f36e6ec9a2ee37424364b6bfeef96d7f40)', build)
+        self.assertIn('  "${fork_image_args[@]}" \\\n', build)
+        self.assertIn('  "${fork_verifier_args[@]}" \\\n', build)
+
+    def test_release_artifact_keeps_the_builder_selected_fork_public_key(self):
+        step = WORKFLOW.split('      - name: Record release request and public OTA key', 1)[1]
+        start = step.index('          for run in "${runs[@]}"; do')
+        end = step.index('          python3 - "$run/release-request.json"', start)
+        script = 'runs=("$1")\n' + textwrap.dedent(step[start:end])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / 'run'
+            stock = root / 'sources/platform/tools/mt8163-arm32/ota/ota-public-key.hex'
+            run.mkdir()
+            stock.parent.mkdir(parents=True)
+            stock.write_bytes(b'stock-public-key\n')
+            fork = run / 'ota-public-key.hex'
+            fork.write_bytes(b'fork-public-key\n')
+            expected = hashlib.sha256(fork.read_bytes()).hexdigest()
+            env = dict(os.environ, EXPECTED_OTA_PUBLIC_KEY_SHA256=expected,
+                       GITHUB_WORKSPACE=str(root))
+            command = ['bash', '-eu', '-o', 'pipefail', '-c', script, 'test', str(run)]
+            result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(fork.read_bytes(), b'fork-public-key\n')
+            env['EXPECTED_OTA_PUBLIC_KEY_SHA256'] = hashlib.sha256(stock.read_bytes()).hexdigest()
+            result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('differs from protected fingerprint', result.stderr)
 
     def derivation(self, **overrides):
         import tempfile

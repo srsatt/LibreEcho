@@ -156,7 +156,9 @@ SSH_ENABLED="${LIBREECHO_SSH_ENABLED:-0}"
 JOBS="${JOBS:-$(nproc)}"
 OTA_DIR="$TOOLS_DIR/ota"
 PLATFORM_RUNTIME_VERIFIER="$TOOLS_DIR/feature_runtime/verify_runtime.py"
-OTA_PUBLIC_KEY="$OTA_DIR/ota-public-key.hex"
+OTA_PUBLIC_KEY="${LIBREECHO_OTA_PUBLIC_KEY:-$OTA_DIR/ota-public-key.hex}"
+OTA_LEGACY_PUBLIC_KEY="$OTA_DIR/ota-public-key.hex"
+RELEASE_REPOSITORY="${LIBREECHO_RELEASE_REPOSITORY:-upstream}"
 OTA_SIGNING_KEY="${LIBREECHO_OTA_SIGNING_KEY:-$PRIVATE_ROOT/ota-signing-key.hex}"
 OTA_SIGNING_MODE="${LIBREECHO_OTA_SIGNING_MODE:-github}"
 # Release workflow dispatches pass v2 explicitly. Local builds which do not
@@ -474,6 +476,20 @@ if [[ "$FEATURES_ENABLED" == 1 && "$SERVICE_PROFILE" == production ]]; then
   }
 fi
 case "$OTA_SIGNING_MODE" in github|local) ;; *) echo "ERROR: invalid OTA signing mode: $OTA_SIGNING_MODE" >&2; exit 1 ;; esac
+case "$RELEASE_REPOSITORY" in upstream|srsatt) ;; *) echo "ERROR: invalid release repository" >&2; exit 1 ;; esac
+if [[ "$RELEASE_REPOSITORY" == srsatt ]]; then
+  [[ "$OTA_SIGNING_MODE" == local && "$OTA_PUBLIC_KEY" != "$OTA_LEGACY_PUBLIC_KEY" ]] || {
+    echo "ERROR: fork release requires a separate signed public key" >&2; exit 1;
+  }
+  [[ -f "$OTA_LEGACY_PUBLIC_KEY" && ! -L "$OTA_LEGACY_PUBLIC_KEY" &&
+     "$(sha256sum "$OTA_LEGACY_PUBLIC_KEY" | awk '{print $1}')" == 524c2b6343438b6ccffca8a8c7f0b9f36e6ec9a2ee37424364b6bfeef96d7f40 ]] || {
+    echo "ERROR: Biscuit legacy OTA public key does not match stock 0.14.4" >&2; exit 1;
+  }
+  [[ -f "$OTA_PUBLIC_KEY" && ! -L "$OTA_PUBLIC_KEY" &&
+     "$(sha256sum "$OTA_PUBLIC_KEY" | awk '{print $1}')" != 524c2b6343438b6ccffca8a8c7f0b9f36e6ec9a2ee37424364b6bfeef96d7f40 ]] || {
+    echo "ERROR: fork OTA public key must differ from stock 0.14.4" >&2; exit 1;
+  }
+fi
 case "$OTA_FORMAT" in
   v1) ;;
   v3)
@@ -2257,6 +2273,14 @@ RUN="$RUNS/$run_id"
 COMPONENTS_MANIFEST="$RUN/components.json"
 BUILDER="$TOOLS_DIR/build_recovery_image.py"
 VERIFIER="$TOOLS_DIR/verify_recovery_image.py"
+fork_image_args=()
+fork_verifier_args=()
+if [[ "$RELEASE_REPOSITORY" == srsatt ]]; then
+  fork_image_args=(--release-repository srsatt)
+  fork_verifier_args=(--expected-release-repository srsatt)
+  [[ "$TARGET" != biscuit ]] || fork_image_args+=(--legacy-ota-public-key "$OTA_LEGACY_PUBLIC_KEY")
+  [[ "$TARGET" != biscuit ]] || fork_verifier_args+=(--expected-legacy-ota-public-key-sha256 524c2b6343438b6ccffca8a8c7f0b9f36e6ec9a2ee37424364b6bfeef96d7f40)
+fi
 IMAGE_DTB="$RUN/$KERNEL_DTB_NAME"
 IMAGE_DTB_SHA256="$dtbsha"
 echo "radar_puffin_dtb_sha256=$IMAGE_DTB_SHA256"
@@ -2275,6 +2299,7 @@ python3 -B "$BUILDER" "${TARGET_TOOL_ARGS[@]}" \
   --feature-policy "$FEATURE_POLICY" \
   --bootctl "$OTA_BOOTCTL" \
   --update-verifier "$OTA_VERIFIER" --ota-public-key "$OTA_PUBLIC_KEY" \
+  "${fork_image_args[@]}" \
   --audio-probe "$RUN/audio_probe" \
   --tinyplay "$RUN/tinyplay" --tinycap "$RUN/tinycap" --tinymix "$RUN/tinymix" \
   --iwconfig "$RUN/iwconfig" \
@@ -2326,6 +2351,7 @@ python3 -B "$VERIFIER" "${TARGET_TOOL_ARGS[@]}" \
   --expected-bootctl-sha256 "$ota_bootctl_sha" \
   --expected-update-verifier-sha256 "$ota_verifier_sha" \
   --expected-ota-public-key-sha256 "$ota_public_key_sha" \
+  "${fork_verifier_args[@]}" \
   --expected-ui-manifest-sha256 "$ui_manifest_sha" \
   --expected-ui-commit "$ui_commit" --expected-ui-diff-sha256 "$ui_diff_sha" \
   "${ssh_verifier_args[@]}" \

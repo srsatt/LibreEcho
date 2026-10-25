@@ -52,6 +52,18 @@ on:
         description: Target-state version (defaults to release branch version)
         required: false
         type: string
+      platform_source:
+        description: Exact Platform repository@commit for an owner sandbox build
+        required: false
+        type: string
+      ui_source:
+        description: Exact UI repository@commit for an owner sandbox build
+        required: false
+        type: string
+      linux_commit:
+        description: Exact Linux source commit for an owner sandbox build
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -71,6 +83,9 @@ jobs:
       platform_sha: ${{ steps.resolve.outputs.platform_sha }}
       linux_sha: ${{ steps.resolve.outputs.linux_sha }}
       ui_sha: ${{ steps.resolve.outputs.ui_sha }}
+      platform_repository: ${{ steps.resolve.outputs.platform_repository }}
+      ui_repository: ${{ steps.resolve.outputs.ui_repository }}
+      release_repository: ${{ steps.resolve.outputs.release_repository }}
       source_set_id: ${{ steps.resolve.outputs.source_set_id }}
       purpose: ${{ steps.resolve.outputs.purpose }}
       channel: ${{ steps.resolve.outputs.channel }}
@@ -94,6 +109,10 @@ jobs:
           SSH_ENABLED_INPUT: ${{ inputs.ssh_enabled || 'disabled' }}
           OTA_FORMAT_INPUT: ${{ inputs.ota_format || 'v3' }}
           OTA_RELEASE_INPUT: ${{ inputs.ota_release || inputs.release_version || '' }}
+          FORK_VERSION_INPUT: ${{ inputs.ota_release || '' }}
+          PLATFORM_SOURCE_INPUT: ${{ inputs.platform_source || '' }}
+          UI_SOURCE_INPUT: ${{ inputs.ui_source || '' }}
+          LINUX_COMMIT_INPUT: ${{ inputs.linux_commit || '' }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
@@ -215,20 +234,57 @@ jobs:
             linux_ref="$component_ref"
             ui_ref="$component_ref"
           fi
+          platform_repository=aslater3/LibreEcho-Platform
+          ui_repository=aslater3/LibreEcho-UI
+          platform_pin=
+          ui_pin=
+          if [[ -n "${PLATFORM_SOURCE_INPUT:-}" ]]; then
+            [[ "$PLATFORM_SOURCE_INPUT" =~ ^(aslater3|srsatt)/LibreEcho-Platform@[0-9a-f]{40}$ ]] || {
+              echo 'ERROR: invalid Platform repository@commit' >&2; exit 1;
+            }
+            platform_repository=${PLATFORM_SOURCE_INPUT%@*}
+            platform_pin=${PLATFORM_SOURCE_INPUT##*@}
+          fi
+          if [[ -n "${UI_SOURCE_INPUT:-}" ]]; then
+            [[ "$UI_SOURCE_INPUT" =~ ^(aslater3|srsatt)/LibreEcho-UI@[0-9a-f]{40}$ ]] || {
+              echo 'ERROR: invalid UI repository@commit' >&2; exit 1;
+            }
+            ui_repository=${UI_SOURCE_INPUT%@*}
+            ui_pin=${UI_SOURCE_INPUT##*@}
+          fi
+          [[ -z "${LINUX_COMMIT_INPUT:-}" || "$LINUX_COMMIT_INPUT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'ERROR: Linux commit must be lowercase 40-hex' >&2; exit 1;
+          }
+          release_repository=upstream
+          if [[ -n "${PLATFORM_SOURCE_INPUT:-}${LINUX_COMMIT_INPUT:-}${UI_SOURCE_INPUT:-}" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$PURPOSE" != sandbox ||
+                  "$SIGNING_MODE" != local || "$GITHUB_REPOSITORY" != srsatt/LibreEcho ||
+                  -z "${PLATFORM_SOURCE_INPUT:-}" || -z "${LINUX_COMMIT_INPUT:-}" ||
+                  -z "${UI_SOURCE_INPUT:-}" || "$ui_repository" != srsatt/LibreEcho-UI ||
+                  "$LINUX_COMMIT_INPUT" != 2da646edaf294ead68123a2450eff49b8084c3ea ||
+                  -z "${FORK_VERSION_INPUT:-}" || "$FORK_VERSION_INPUT" == 0.14.4 ]]; then
+              echo 'ERROR: fork sources require signed owner sandbox, reviewed Linux baseline, all three pins, and a new explicit ota_release' >&2; exit 1;
+            fi
+            release_repository=srsatt
+          fi
           for ref_spec in \
-            "LibreEcho-Platform:$platform_ref" \
-            "LibreEcho-Linux-6.1:$linux_ref" \
-            "LibreEcho-UI:$ui_ref"; do
+            "$platform_repository:$platform_ref:$platform_pin" \
+            "aslater3/LibreEcho-Linux-6.1:$linux_ref:${LINUX_COMMIT_INPUT:-}" \
+            "$ui_repository:$ui_ref:$ui_pin"; do
             component="${ref_spec%%:*}"
-            ref_name="${ref_spec#*:}"
-            git ls-remote --exit-code "https://github.com/aslater3/$component.git" "refs/heads/$ref_name" >/dev/null || {
+            ref_name="${ref_spec#*:}"; ref_name="${ref_name%%:*}"
+            pin="${ref_spec##*:}"
+            [[ -n "$pin" ]] && continue
+            git ls-remote --exit-code "https://github.com/$component.git" "refs/heads/$ref_name" >/dev/null || {
               echo "ERROR: coordinated component ref is missing: $component:$ref_name" >&2
               exit 1
             }
           done
-          p=$(git ls-remote "https://github.com/aslater3/LibreEcho-Platform.git" "refs/heads/$platform_ref" | cut -f1)
-          l=$(git ls-remote "https://github.com/aslater3/LibreEcho-Linux-6.1.git" "refs/heads/$linux_ref" | cut -f1)
-          u=$(git ls-remote "https://github.com/aslater3/LibreEcho-UI.git" "refs/heads/$ui_ref" | cut -f1)
+          p=${platform_pin:-$(git ls-remote "https://github.com/$platform_repository.git" "refs/heads/$platform_ref" | cut -f1)}
+          l=${LINUX_COMMIT_INPUT:-$(git ls-remote "https://github.com/aslater3/LibreEcho-Linux-6.1.git" "refs/heads/$linux_ref" | cut -f1)}
+          u=${ui_pin:-$(git ls-remote "https://github.com/$ui_repository.git" "refs/heads/$ui_ref" | cut -f1)}
+          printf 'platform_repository=%s\nui_repository=%s\nrelease_repository=%s\n' \
+            "$platform_repository" "$ui_repository" "$release_repository" >> "$GITHUB_OUTPUT"
           python3 build/ci/resolve-source-set.py \
             --product "$PRODUCT_SHA" --platform "$p" --linux "$l" --ui "$u" \
             --channel "$RELEASE_CHANNEL" >> "$GITHUB_OUTPUT"
@@ -260,7 +316,7 @@ jobs:
         with: {fetch-depth: 1, persist-credentials: false}
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          repository: aslater3/LibreEcho-Platform
+          repository: ${{ needs.resolve-and-preflight.outputs.platform_repository }}
           ref: ${{ needs.resolve-and-preflight.outputs.platform_sha }}
           path: platform-source
           fetch-depth: 1
@@ -594,7 +650,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          repository: aslater3/LibreEcho-Platform
+          repository: ${{ needs.resolve-and-preflight.outputs.platform_repository }}
           ref: ${{ needs.resolve-and-preflight.outputs.platform_sha }}
           path: sources/platform
           fetch-depth: 1
@@ -614,18 +670,41 @@ jobs:
             (cd sources/linux && xargs -0 touch -h -d "@$epoch" --)
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          repository: aslater3/LibreEcho-UI
+          repository: ${{ needs.resolve-and-preflight.outputs.ui_repository }}
           ref: ${{ needs.resolve-and-preflight.outputs.ui_sha }}
           path: sources/ui
           fetch-depth: 1
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          repository: aslater3/LibreEcho
+          repository: ${{ github.repository }}
           ref: ${{ needs.resolve-and-preflight.outputs.product_sha }}
           path: sources/product
           fetch-depth: 1
           persist-credentials: false
+      - name: Verify exact source checkouts and fork version
+        env:
+          PRODUCT_SHA: ${{ needs.resolve-and-preflight.outputs.product_sha }}
+          PLATFORM_SHA: ${{ needs.resolve-and-preflight.outputs.platform_sha }}
+          LINUX_SHA: ${{ needs.resolve-and-preflight.outputs.linux_sha }}
+          UI_SHA: ${{ needs.resolve-and-preflight.outputs.ui_sha }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-and-preflight.outputs.release_repository }}
+          OTA_RELEASE: ${{ needs.resolve-and-preflight.outputs.ota_release }}
+        run: |
+          set -euo pipefail
+          for source in "sources/product:$PRODUCT_SHA" "sources/platform:$PLATFORM_SHA" \
+                        "sources/linux:$LINUX_SHA" "sources/ui:$UI_SHA"; do
+            path=${source%%:*}
+            expected=${source#*:}
+            [[ "$(git -C "$path" rev-parse HEAD)" == "$expected" ]] || {
+              echo "ERROR: checked-out source differs from resolved pin: $path" >&2; exit 1;
+            }
+          done
+          if [[ "$RELEASE_REPOSITORY" == srsatt ]]; then
+            [[ "$(tr -d '\r\n' <sources/ui/VERSION)" == "$OTA_RELEASE" ]] || {
+              echo 'ERROR: fork UI VERSION must equal the explicitly selected target version' >&2; exit 1;
+            }
+          fi
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           name: public-deps-${{ needs.resolve-and-preflight.outputs.source_set_id }}
@@ -725,6 +804,24 @@ jobs:
           test -n "$OTA_SIGNING_KEY_HEX"
           umask 077
           printf '%s\n' "$OTA_SIGNING_KEY_HEX" >"$RUNNER_TEMP/ota-signing-key.hex"
+      - name: Derive and verify fork OTA public key
+        if: needs.resolve-and-preflight.outputs.release_repository == 'srsatt'
+        env:
+          EXPECTED_SHA256: ${{ vars.LIBREECHO_OTA_EXPECTED_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib, re
+          from nacl.signing import SigningKey
+          seed = pathlib.Path(os.environ['RUNNER_TEMP'], 'ota-signing-key.hex').read_text().strip()
+          if not re.fullmatch(r'[0-9a-f]{64}', seed):
+              raise SystemExit('ERROR: invalid protected OTA signing seed')
+          key = SigningKey(bytes.fromhex(seed)).verify_key.encode().hex().encode() + b'\n'
+          expected = os.environ['EXPECTED_SHA256']
+          if not re.fullmatch(r'[0-9a-f]{64}', expected) or hashlib.sha256(key).hexdigest() != expected:
+              raise SystemExit('ERROR: fork OTA public key does not match protected fingerprint')
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'ota-public-key.hex').write_bytes(key)
+          PY
       - name: Derive reviewed TTS voice models
         run: |
           set -euo pipefail
@@ -1199,6 +1296,8 @@ jobs:
           # Protected environment configuration, never a candidate field.
           LIBREECHO_OTA_EXPECTED_PUBLIC_KEY_SHA256: ${{ vars.LIBREECHO_OTA_EXPECTED_PUBLIC_KEY_SHA256 }}
           LIBREECHO_OTA_SIGNING_KEY: ${{ needs.resolve-and-preflight.outputs.signing_mode == 'local' && format('{0}/ota-signing-key.hex', runner.temp) || '' }}
+          LIBREECHO_OTA_PUBLIC_KEY: ${{ needs.resolve-and-preflight.outputs.release_repository == 'srsatt' && format('{0}/ota-public-key.hex', runner.temp) || '' }}
+          LIBREECHO_RELEASE_REPOSITORY: ${{ needs.resolve-and-preflight.outputs.release_repository }}
           LIBREECHO_OTA_FORMAT: ${{ needs.resolve-and-preflight.outputs.ota_format }}
           LIBREECHO_OTA_RELEASE: ${{ needs.resolve-and-preflight.outputs.ota_release }}
           LIBREECHO_TARGET_RELEASE_TAG: ${{ needs.resolve-and-preflight.outputs.release_tag }}
@@ -1263,13 +1362,18 @@ jobs:
           PLATFORM_SHA: ${{ needs.resolve-and-preflight.outputs.platform_sha }}
           LINUX_SHA: ${{ needs.resolve-and-preflight.outputs.linux_sha }}
           UI_SHA: ${{ needs.resolve-and-preflight.outputs.ui_sha }}
+          PRODUCT_REPOSITORY: ${{ github.repository }}
+          PLATFORM_REPOSITORY: ${{ needs.resolve-and-preflight.outputs.platform_repository }}
+          UI_REPOSITORY: ${{ needs.resolve-and-preflight.outputs.ui_repository }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-and-preflight.outputs.release_repository }}
         run: |
           set -euo pipefail
           mapfile -t runs < <(find "$RUNNER_TEMP/libreecho-build/out/runs" -mindepth 1 -maxdepth 1 -type d)
           test "${#runs[@]}" -ge 1
           for run in "${runs[@]}"; do
-          printf 'product=%s\nplatform=%s\nlinux=%s\nui=%s\n' \
+          printf 'product=%s\nplatform=%s\nlinux=%s\nui=%s\nproduct_repository=%s\nplatform_repository=%s\nlinux_repository=aslater3/LibreEcho-Linux-6.1\nui_repository=%s\nrelease_repository=%s\n' \
             "$PRODUCT_SHA" "$PLATFORM_SHA" "$LINUX_SHA" "$UI_SHA" \
+            "$PRODUCT_REPOSITORY" "$PLATFORM_REPOSITORY" "$UI_REPOSITORY" "$RELEASE_REPOSITORY" \
             >"$run/release-source-commits.txt"
           done
 
@@ -1281,17 +1385,20 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve-and-preflight.outputs.release_version }}
           RELEASE_NOTES: ${{ needs.resolve-and-preflight.outputs.release_notes }}
           SSH_ENABLED: ${{ needs.resolve-and-preflight.outputs.ssh_enabled }}
+          EXPECTED_OTA_PUBLIC_KEY_SHA256: ${{ vars.LIBREECHO_OTA_EXPECTED_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
           mapfile -t runs < <(find "$RUNNER_TEMP/libreecho-build/out/runs" -mindepth 1 -maxdepth 1 -type d)
           test "${#runs[@]}" -ge 1
           for run in "${runs[@]}"; do
-          install -m 0644 "$GITHUB_WORKSPACE/sources/platform/tools/mt8163-arm32/ota/ota-public-key.hex" "$run/ota-public-key.hex"
+            [[ -f "$run/ota-public-key.hex" && ! -L "$run/ota-public-key.hex" ]] || {
+              echo "ERROR: builder did not export an OTA public key: $run" >&2; exit 1;
+            }
+            [[ "$(sha256sum "$run/ota-public-key.hex" | cut -d' ' -f1)" == "$EXPECTED_OTA_PUBLIC_KEY_SHA256" ]] || {
+              echo "ERROR: builder OTA public key differs from protected fingerprint: $run" >&2; exit 1;
+            }
           done
           run="${runs[0]}"
-          install -m 0644 \
-            "$GITHUB_WORKSPACE/sources/platform/tools/mt8163-arm32/ota/ota-public-key.hex" \
-            "$run/ota-public-key.hex"
           python3 - "$run/release-request.json" <<'PY'
           import json, os, pathlib, sys
           pathlib.Path(sys.argv[1]).write_text(json.dumps({

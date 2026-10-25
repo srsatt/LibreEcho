@@ -66,6 +66,28 @@ publication or pointer movement, with 3-day artifact retention.
 The release-line scheduled build resolver remains unchanged, but scheduled
 requests fail closed at publication routing and cannot move the dev pointer.
 
+For an owner fork candidate, dispatch this workflow from `srsatt/LibreEcho`
+with `build_purpose=sandbox`, `sandbox_signing=signed`, an explicit new
+`ota_release` version, and all three exact source inputs:
+`platform_source=OWNER/LibreEcho-Platform@40-hex-commit`,
+`ui_source=srsatt/LibreEcho-UI@40-hex-commit`, and
+`linux_commit=40-hex-commit`, where `OWNER` is `aslater3` or `srsatt`.
+Platform may use the exact upstream commit or
+an existing reviewed `srsatt` fork commit; the workflow does not create or
+assume that fork. Linux remains in `aslater3/LibreEcho-Linux-6.1` at installed
+commit `2da646edaf294ead68123a2450eff49b8084c3ea`. The UI
+`VERSION` must equal `ota_release`. The protected signing seed and expected
+public-key SHA-256 must describe the same fork authority. This lane derives
+the public key, checks every checkout against its resolved commit, embeds the
+fork release source and, for Biscuit, the pinned stock rollback key, then
+independently verifies the image. It only emits a short-lived sandbox artifact;
+it does not publish or update a device. Source repository names and commits
+are recorded together in `release-source-commits.txt`.
+The SOPS-encrypted key file under `secrets/` is owner recovery storage; this
+workflow never decrypts it or receives the owner's age identity. The fork CI
+environment requires its own dedicated protected `LIBREECHO_OTA_SIGNING_KEY_HEX`
+secret before any signed sandbox build can run.
+
 - **PR validation:** pull requests targeting `main` or `release/**` build a
   no-publish OTA-profile image with the development channel. The run artifact is
   validation evidence only and never publishes a release.

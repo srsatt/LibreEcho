@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: ^secrets/ota-signing-key\.sops\.yaml$
+    age: age14de4wmhqrpea0plm5vv3939zdmazc62l8e8nwh0u0w8rnm6fvehs9lp9y5
