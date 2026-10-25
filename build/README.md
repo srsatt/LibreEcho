@@ -72,6 +72,9 @@ with `build_purpose=sandbox`, `sandbox_signing=signed`, an explicit new
 `platform_source=OWNER/LibreEcho-Platform@40-hex-commit`,
 `ui_source=srsatt/LibreEcho-UI@40-hex-commit`, and
 `linux_commit=40-hex-commit`, where `OWNER` is `aslater3` or `srsatt`.
+This explicit owner sandbox dispatch may run from a `feature/*` branch before
+its later PR. Feature pushes, schedules, unsigned builds and publication lanes
+do not receive that exception; the protected signing environment still applies.
 Platform may use the exact upstream commit or
 an existing reviewed `srsatt` fork commit; the workflow does not create or
 assume that fork. Linux remains in `aslater3/LibreEcho-Linux-6.1` at installed

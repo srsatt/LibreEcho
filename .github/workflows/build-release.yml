@@ -123,6 +123,15 @@ jobs:
           else
             case "$GITHUB_REF" in
               refs/heads/main|refs/heads/release/*) ;;
+              refs/heads/feature/*)
+                [[ "$GITHUB_EVENT_NAME" == workflow_dispatch &&
+                   "$GITHUB_REPOSITORY" == srsatt/LibreEcho &&
+                   "${BUILD_PURPOSE_INPUT:-}" == sandbox &&
+                   "${SANDBOX_SIGNING_INPUT:-}" == signed &&
+                   -n "${PLATFORM_SOURCE_INPUT:-}" && -n "${UI_SOURCE_INPUT:-}" &&
+                   -n "${LINUX_COMMIT_INPUT:-}" ]] || {
+                  echo 'ERROR: feature refs require an exact-source signed owner sandbox dispatch' >&2; exit 1;
+                } ;;
               *) echo "ERROR: unsupported build ref: $GITHUB_REF" >&2; exit 1 ;;
             esac
           fi

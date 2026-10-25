@@ -34,6 +34,49 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.splitlines()
 
+    def dispatch_ref(self, **overrides):
+        block = shell_block('          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then',
+                            '          BUILD_PURPOSE_INPUT=${BUILD_PURPOSE_INPUT:-}')
+        inputs = dict(GITHUB_EVENT_NAME='workflow_dispatch',
+                      GITHUB_REF='refs/heads/feature/fork-trust-bootstrap',
+                      GITHUB_REPOSITORY='srsatt/LibreEcho',
+                      BUILD_PURPOSE_INPUT='sandbox', SANDBOX_SIGNING_INPUT='signed',
+                      PLATFORM_SOURCE_INPUT='srsatt/LibreEcho-Platform@' + 'a' * 40,
+                      UI_SOURCE_INPUT='srsatt/LibreEcho-UI@' + 'b' * 40,
+                      LINUX_COMMIT_INPUT='2da646edaf294ead68123a2450eff49b8084c3ea')
+        inputs.update(overrides)
+        return self.run_shell(block, **inputs)
+
+    def test_owner_feature_dispatch_reaches_exact_source_validation(self):
+        result = self.dispatch_ref()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.sources(GITHUB_REF='refs/heads/feature/fork-trust-bootstrap',
+                              GITHUB_REF_NAME='feature/fork-trust-bootstrap',
+                              FORK_VERSION_INPUT='0.15.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_feature_dispatch_rejects_other_events_owners_lanes_and_missing_pins(self):
+        cases = [{'GITHUB_EVENT_NAME': event} for event in ('push', 'schedule', 'workflow_call')]
+        cases += [{'GITHUB_REPOSITORY': owner + '/LibreEcho'} for owner in ('aslater3', 'someone')]
+        cases += [{'BUILD_PURPOSE_INPUT': purpose} for purpose in ('dev', 'prd', '')]
+        cases += [{'SANDBOX_SIGNING_INPUT': mode} for mode in ('unsigned', '')]
+        cases += [{name: ''} for name in ('PLATFORM_SOURCE_INPUT', 'UI_SOURCE_INPUT', 'LINUX_COMMIT_INPUT')]
+        cases += [{'GITHUB_REF': 'refs/heads/fix/not-an-owner-build'}]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.assertNotEqual(self.dispatch_ref(**overrides).returncode, 0)
+
+    def test_regular_dispatch_and_pull_request_ref_policy_is_preserved(self):
+        for ref in ('refs/heads/main', 'refs/heads/release/0.15.0'):
+            result = self.dispatch_ref(GITHUB_REF=ref, GITHUB_REPOSITORY='aslater3/LibreEcho',
+                                       BUILD_PURPOSE_INPUT='sandbox', SANDBOX_SIGNING_INPUT='unsigned',
+                                       PLATFORM_SOURCE_INPUT='', UI_SOURCE_INPUT='', LINUX_COMMIT_INPUT='')
+            self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.dispatch_ref(GITHUB_EVENT_NAME='pull_request', GITHUB_BASE_REF='main')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.dispatch_ref(GITHUB_EVENT_NAME='pull_request',
+                                             GITHUB_BASE_REF='feature/fork-trust-bootstrap').returncode, 0)
+
     def test_same_owner_coordinated_014_candidates(self):
         self.assertEqual(self.selection(), ['fix/forward-port-01314'] * 3)
 
